@@ -2008,9 +2008,20 @@ async function startRuntime(input: {
       question: "allow",
       "paperclip_*": "allow",
       "mcp__paperclip__*": "allow",
-      external_directory: instructionRoot
-        ? { "*": "deny", [`${instructionRoot}/**`]: "allow" }
-        : "deny",
+      external_directory: (() => {
+        const allowed: Record<string, "allow" | "deny"> = { "*": "deny" };
+        if (instructionRoot) allowed[`${instructionRoot}/**`] = "allow";
+        // The run owns its per-run scratch directory (PAPERCLIP_RUN_SCRATCH_DIR)
+        // and its private runtime root. Allow those roots so a tool can read back
+        // artifacts it just wrote (e.g. screenshots) instead of being
+        // auto-rejected, which aborts the session.
+        const scratchDir = input.options.environment?.PAPERCLIP_RUN_SCRATCH_DIR;
+        if (typeof scratchDir === "string" && scratchDir.length > 0) {
+          allowed[`${scratchDir.replace(/\/+$/, "")}/**`] = "allow";
+        }
+        if (input.root) allowed[`${input.root}/**`] = "allow";
+        return allowed;
+      })(),
     },
     mcp: {
       paperclip: {
