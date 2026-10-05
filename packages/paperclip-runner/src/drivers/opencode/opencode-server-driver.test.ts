@@ -781,7 +781,8 @@ describe("OpenCodeServerDriver", () => {
     );
     expect(config).toContain("openrouter/deepseek/deepseek-v4-flash-0731");
     expect(config).toContain('"*": "allow"');
-    expect(config).toContain('"external_directory": "deny"');
+    expect(config).toContain('"external_directory": {');
+    expect(config).toContain('"*": "deny"');
     expect(
       events.some((event) => event.eventType === "runtime_request.created"),
     ).toBe(false);
@@ -1808,7 +1809,7 @@ describe("OpenCodeServerDriver", () => {
       );
       expect(config.permission).toMatchObject({
         "*": permissionMode,
-        external_directory: "deny",
+        external_directory: { "*": "deny" },
       });
       expect(config.provider.openrouter.models).toHaveProperty(
         "deepseek/deepseek-v4-flash-0731",
@@ -1818,6 +1819,50 @@ describe("OpenCodeServerDriver", () => {
       await session.close({ reason: "permission mode test complete" });
     },
   );
+
+  it("allows the per-run scratch directory as an external read root", async () => {
+    await chmod(fixture, 0o755);
+    const root = await mkdtemp(
+      join(tmpdir(), "paperclip-opencode-scratch-"),
+    );
+    const workspace = await mkdtemp(
+      join(tmpdir(), "paperclip-opencode-scratch-workspace-"),
+    );
+    const scratchDir = await mkdtemp(
+      join(tmpdir(), "paperclip-opencode-scratch-dir-"),
+    );
+    roots.push(root, workspace, scratchDir);
+    const driver = new OpenCodeServerDriver({
+      model: "openrouter/deepseek/deepseek-v4-flash-0731",
+      runtimeDirectory: root,
+      command: fixture,
+      environment: {
+        PATH: process.env.PATH,
+        OPENROUTER_API_KEY: "fixture-key",
+        PAPERCLIP_RUN_SCRATCH_DIR: scratchDir,
+      },
+    });
+    const session = await driver.openSession({
+      runId: "run-scratch-read",
+      normalizedSessionId: "scratch-read",
+      workingDirectory: workspace,
+    });
+    const config = JSON.parse(
+      await readFile(
+        join(root, "scratch-read", "config", "opencode", "opencode.json"),
+        "utf8",
+      ),
+    );
+    // The runtime root is the per-session root (runtimeDirectory/<sessionId>),
+    // which is where the driver writes the isolated config.
+    const sessionRoot = join(root, "scratch-read");
+    expect(config.permission.external_directory).toMatchObject({
+      "*": "deny",
+      [`${scratchDir}/**`]: "allow",
+      [`${sessionRoot}/**`]: "allow",
+    });
+    await session.close({ reason: "scratch read root test complete" });
+  });
 
   it("clears a stale active turn that already has a persisted terminal fingerprint", async () => {
     await chmod(fixture, 0o755);
