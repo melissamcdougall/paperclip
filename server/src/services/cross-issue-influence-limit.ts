@@ -1,6 +1,6 @@
-import { and, count, eq } from "drizzle-orm";
+import { and, count, eq, or } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { activityLog, heartbeatRuns } from "@paperclipai/db";
+import { activityLog, heartbeatRuns, issues } from "@paperclipai/db";
 import { isUuidLike, issueWriteDenialResponse } from "@paperclipai/shared";
 import { forbidden } from "../errors.js";
 import { logger } from "../middleware/logger.js";
@@ -109,7 +109,22 @@ export async function observeCrossIssueInfluence(
       throw crossIssueInfluenceRunContextError();
     }
 
-    const sourceIssueId = readRunSourceIssueId(run.contextSnapshot);
+    // Unassigned local-adapter retry runs (e.g. `transient_failure_retry` with no
+    // task binding) never get `contextSnapshot.issueId` populated at creation —
+    // checkout only ever updates `issues.checkoutRunId`/`executionRunId`, not the
+    // run row. Fall back to the issue the run actually has checked out before
+    // concluding the run has no resolvable source issue at all.
+    const sourceIssueId =
+      readRunSourceIssueId(run.contextSnapshot) ??
+      (await tx
+        .select({ id: issues.id })
+        .from(issues)
+        .where(and(
+          eq(issues.companyId, input.companyId),
+          or(eq(issues.executionRunId, input.runId), eq(issues.checkoutRunId, input.runId)),
+        ))
+        .limit(1)
+        .then((rows) => rows[0]?.id ?? null));
     if (!sourceIssueId) throw crossIssueInfluenceRunContextError();
     if (
       sourceIssueId === input.targetIssueId ||

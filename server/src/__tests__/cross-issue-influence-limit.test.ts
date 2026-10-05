@@ -10,6 +10,7 @@ import {
 function counterDb(
   initialCount = 0,
   runOverrides: Record<string, unknown> | null = {},
+  checkedOutIssueId: string | null = null,
 ) {
   let observedCount = initialCount;
   const inserted: Array<Record<string, unknown>> = [];
@@ -23,6 +24,7 @@ function counterDb(
             };
           }
           return {
+            // Run-row lookup: `.for("update")` then `.then(...)`.
             for: () => ({
               then: (resolve: (rows: unknown[]) => unknown) => resolve(runOverrides === null ? [] : [{
                 id: "11111111-1111-4111-8111-111111111111",
@@ -32,6 +34,12 @@ function counterDb(
                 contextSnapshot: { issueId: "44444444-4444-4444-8444-444444444444" },
                 ...runOverrides,
               }]),
+            }),
+            // Checked-out-issue fallback lookup: `.limit(1)` then `.then(...)`,
+            // used when `contextSnapshot` has no source issue of its own.
+            limit: () => ({
+              then: (resolve: (rows: unknown[]) => unknown) =>
+                resolve(checkedOutIssueId ? [{ id: checkedOutIssueId }] : []),
             }),
           };
         },
@@ -198,7 +206,7 @@ describe("cross-issue influence limit rollout", () => {
     expect(fake.inserted).toEqual([]);
   });
 
-  it("fails closed when the persisted run has no source issue", async () => {
+  it("fails closed when the persisted run has no source issue and nothing is checked out", async () => {
     const fake = counterDb(0, { contextSnapshot: {} });
 
     await expect(observeCrossIssueInfluence(fake.db as never, {
@@ -212,5 +220,50 @@ describe("cross-issue influence limit rollout", () => {
       details: { code: "cross_issue_influence_run_context_required" },
     });
     expect(fake.inserted).toEqual([]);
+  });
+
+  // Regression for an unassigned local-adapter retry run (e.g. a
+  // `transient_failure_retry` wake with no task binding): `contextSnapshot`
+  // never got `issueId` populated at creation, but the run successfully
+  // checked out its origin issue earlier, so `issues.executionRunId` (or
+  // `checkoutRunId`) already points back at this run. Writing back to that
+  // same checked-out issue must resolve and be treated as same-issue (not
+  // cross-issue), not 403 with `cross_issue_influence_run_context_required`.
+  it("resolves the source issue from checkout state when contextSnapshot has none, and treats a write to that issue as same-issue", async () => {
+    const fake = counterDb(
+      0,
+      { contextSnapshot: {} },
+      "55555555-5555-4555-8555-555555555555",
+    );
+
+    await expect(observeCrossIssueInfluence(fake.db as never, {
+      companyId: "22222222-2222-4222-8222-222222222222",
+      runId: "11111111-1111-4111-8111-111111111111",
+      agentId: "33333333-3333-4333-8333-333333333333",
+      targetIssueId: "55555555-5555-4555-8555-555555555555",
+      kind: "update",
+    })).resolves.toBeNull();
+    expect(fake.inserted).toEqual([]);
+  });
+
+  // Same checkout-derived resolution, but the write targets a *different*
+  // issue than the one checked out — this is genuinely cross-issue and must
+  // still be counted against the per-run cap, not silently waved through.
+  it("resolves the source issue from checkout state and still counts a write to a different issue as cross-issue", async () => {
+    const fake = counterDb(
+      0,
+      { contextSnapshot: {} },
+      "66666666-6666-4666-8666-666666666666",
+    );
+
+    await expect(observeCrossIssueInfluence(fake.db as never, {
+      companyId: "22222222-2222-4222-8222-222222222222",
+      runId: "11111111-1111-4111-8111-111111111111",
+      agentId: "33333333-3333-4333-8333-333333333333",
+      targetIssueId: "55555555-5555-4555-8555-555555555555",
+      kind: "update",
+      now: new Date(CROSS_ISSUE_INFLUENCE_ENFORCE_AT.getTime() - 1),
+    })).resolves.toMatchObject({ allowed: true, count: 1 });
+    expect(fake.inserted).toHaveLength(1);
   });
 });
